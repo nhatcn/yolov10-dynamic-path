@@ -180,5 +180,5 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
-    "DynamicPath", "ComplexityPredictor"
+    DynamicPath, ComplexityPredictor
 )

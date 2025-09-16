@@ -60,7 +60,6 @@ from .block import (
     SCDown,
     TorchVision,
 )
-from .dips import DynamicPath, ComplexityPredictor
 from .conv import (
     CBAM,
     ChannelAttention,
@@ -180,5 +179,4 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
-    "DynamicPath", "ComplexityPredictor"
 )

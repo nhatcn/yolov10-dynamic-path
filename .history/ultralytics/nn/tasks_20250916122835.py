@@ -68,7 +68,7 @@ from ultralytics.nn.modules import (
     YOLOEDetect,
     YOLOESegment,
     v10Detect,
-    DynamicPath, ComplexityPredictor
+    D
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1594,7 +1594,6 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             C2fCIB,
             A2C2f,
-            
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1614,7 +1613,6 @@ def parse_model(d, ch, verbose=True):
             C2fCIB,
             C2PSA,
             A2C2f,
-            DynamicPath, ComplexityPredictor            
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
@@ -1654,7 +1652,7 @@ def parse_model(d, ch, verbose=True):
                 legacy = False
         elif m is ComplexityPredictor:
             args = [ch[f]]
-        elif m is DynamicPath:
+        elif m is DynamicRouter:
             c1, c2 = ch[f], args[0]
             c2 = make_divisible(min(c2, max_channels) * width, 8)
             args = [c1, c2, *args[1:]]

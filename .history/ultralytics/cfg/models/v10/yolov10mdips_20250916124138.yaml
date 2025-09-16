@@ -1,0 +1,47 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# YOLOv10m-DIPS object detection model with Dynamic Inference Path Selection
+nc: 80 # number of classes
+scales:
+  # [depth, width, max_channels]
+  m: [0.67, 0.75, 768]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 3, C2f, [128, True]]  # 2
+  
+  # DIPS Integration - Thêm Complexity Predictor
+  - [2, 1, ComplexityPredictor, []] # 3-Complexity Analysis
+  
+  - [-1, 1, DynamicPath, [256]] # 4-P3/8-Dynamic (thay Conv)
+  - [-1, 6, C2f, [256, True]]   # 5
+  
+  - [-1, 1, DynamicPath, [512]] # 6-P4/16-Dynamic (thay SCDown) 
+  - [-1, 6, C2f, [512, True]]   # 7
+  
+  - [-1, 1, SCDown, [1024, 3, 2]] # 8-P5/32
+  - [-1, 3, C2fCIB, [1024, True]] # 9
+  - [-1, 1, SPPF, [1024, 5]]      # 10
+  - [-1, 1, PSA, [1024]]          # 11
+
+# YOLOv10 head (cập nhật index do backbone thay đổi)
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 7], 1, Concat, [1]] # cat backbone P4 (index 7 thay vì 6)
+  - [-1, 3, C2f, [512]] # 14
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 5], 1, Concat, [1]] # cat backbone P3 (index 5 thay vì 4)
+  - [-1, 3, C2f, [256]] # 17 (P3/8-small)
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 14], 1, Concat, [1]] # cat head P4
+  - [-1, 3, C2fCIB, [512, True]] # 20 (P4/16-medium)
+
+  - [-1, 1, SCDown, [512, 3, 2]]
+  - [[-1, 11], 1, Concat, [1]] # cat head P5
+  - [-1, 3, C2fCIB, [1024, True]] # 23 (P5/32-large)
+
+  - [[17, 20, 23], 1, v10Detect, [nc]] # Detect(P3, P4, P5)
