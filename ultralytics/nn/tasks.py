@@ -67,10 +67,9 @@ from ultralytics.nn.modules import (
     WorldDetect,
     YOLOEDetect,
     YOLOESegment,
-    v10Detect,
-    DynamicPath, ComplexityPredictor
+    v10Detect, AMSA, DSFB
 )
-from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, YAML, colorstr, emojis
+from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
     E2EDetectLoss,
@@ -330,12 +329,13 @@ class BaseModel(torch.nn.Module):
 
         Args:
             batch (dict): Batch to compute loss on.
-            preds (torch.Tensor | List[torch.Tensor], optional): Predictions.
+            preds (torch.Tensor | list[torch.Tensor], optional): Predictions.
         """
         if getattr(self, "criterion", None) is None:
             self.criterion = self.init_criterion()
 
-        preds = self.forward(batch["img"]) if preds is None else preds
+        if preds is None:
+            preds = self.forward(batch["img"])
         return self.criterion(preds, batch)
 
     def init_criterion(self):
@@ -481,10 +481,10 @@ class DetectionModel(BaseModel):
         Clip YOLO augmented inference tails.
 
         Args:
-            y (List[torch.Tensor]): List of detection tensors.
+            y (list[torch.Tensor]): List of detection tensors.
 
         Returns:
-            (List[torch.Tensor]): Clipped detection tensors.
+            (list[torch.Tensor]): Clipped detection tensors.
         """
         nl = self.model[-1].nl  # number of detection layers (P3-P5)
         g = sum(4**x for x in range(nl))  # grid points
@@ -766,7 +766,7 @@ class RTDETRDetectionModel(DetectionModel):
 
         img = batch["img"]
         # NOTE: preprocess gt_bbox and gt_labels to list.
-        bs = len(img)
+        bs = img.shape[0]
         batch_idx = batch["batch_idx"]
         gt_groups = [(batch_idx == i).sum().item() for i in range(bs)]
         targets = {
@@ -776,7 +776,8 @@ class RTDETRDetectionModel(DetectionModel):
             "gt_groups": gt_groups,
         }
 
-        preds = self.predict(img, batch=targets) if preds is None else preds
+        if preds is None:
+            preds = self.predict(img, batch=targets)
         dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta = preds if self.training else preds[1]
         if dn_meta is None:
             dn_bboxes, dn_scores = None, None
@@ -875,7 +876,7 @@ class WorldModel(DetectionModel):
         Set classes in advance so that model could do offline-inference without clip model.
 
         Args:
-            text (List[str]): List of class names.
+            text (list[str]): List of class names.
             batch (int): Batch size for processing text tokens.
             cache_clip_model (bool): Whether to cache the CLIP model.
         """
@@ -887,7 +888,7 @@ class WorldModel(DetectionModel):
         Set classes in advance so that model could do offline-inference without clip model.
 
         Args:
-            text (List[str]): List of class names.
+            text (list[str]): List of class names.
             batch (int): Batch size for processing text tokens.
             cache_clip_model (bool): Whether to cache the CLIP model.
 
@@ -922,7 +923,7 @@ class WorldModel(DetectionModel):
             (torch.Tensor): Model's output tensor.
         """
         txt_feats = (self.txt_feats if txt_feats is None else txt_feats).to(device=x.device, dtype=x.dtype)
-        if len(txt_feats) != len(x) or self.model[-1].export:
+        if txt_feats.shape[0] != x.shape[0] or self.model[-1].export:
             txt_feats = txt_feats.expand(x.shape[0], -1, -1)
         ori_txt_feats = txt_feats.clone()
         y, dt, embeddings = [], [], []  # outputs
@@ -957,7 +958,7 @@ class WorldModel(DetectionModel):
 
         Args:
             batch (dict): Batch to compute loss on.
-            preds (torch.Tensor | List[torch.Tensor], optional): Predictions.
+            preds (torch.Tensor | list[torch.Tensor], optional): Predictions.
         """
         if not hasattr(self, "criterion"):
             self.criterion = self.init_criterion()
@@ -1013,7 +1014,7 @@ class YOLOEModel(DetectionModel):
         Set classes in advance so that model could do offline-inference without clip model.
 
         Args:
-            text (List[str]): List of class names.
+            text (list[str]): List of class names.
             batch (int): Batch size for processing text tokens.
             cache_clip_model (bool): Whether to cache the CLIP model.
             without_reprta (bool): Whether to return text embeddings cooperated with reprta module.
@@ -1036,7 +1037,6 @@ class YOLOEModel(DetectionModel):
         if without_reprta:
             return txt_feats
 
-        assert not self.training
         head = self.model[-1]
         assert isinstance(head, YOLOEDetect)
         return head.get_tpe(txt_feats)  # run auxiliary text head
@@ -1061,7 +1061,7 @@ class YOLOEModel(DetectionModel):
 
         Args:
             vocab (nn.ModuleList): List of vocabulary items.
-            names (List[str]): List of class names.
+            names (list[str]): List of class names.
         """
         assert not self.training
         head = self.model[-1]
@@ -1115,7 +1115,7 @@ class YOLOEModel(DetectionModel):
         Set classes in advance so that model could do offline-inference without clip model.
 
         Args:
-            names (List[str]): List of class names.
+            names (list[str]): List of class names.
             embeddings (torch.Tensor): Embeddings tensor.
         """
         assert not hasattr(self.model[-1], "lrpc"), (
@@ -1204,7 +1204,7 @@ class YOLOEModel(DetectionModel):
 
         Args:
             batch (dict): Batch to compute loss on.
-            preds (torch.Tensor | List[torch.Tensor], optional): Predictions.
+            preds (torch.Tensor | list[torch.Tensor], optional): Predictions.
         """
         if not hasattr(self, "criterion"):
             from ultralytics.utils.loss import TVPDetectLoss
@@ -1252,7 +1252,7 @@ class YOLOESegModel(YOLOEModel, SegmentationModel):
 
         Args:
             batch (dict): Batch to compute loss on.
-            preds (torch.Tensor | List[torch.Tensor], optional): Predictions.
+            preds (torch.Tensor | list[torch.Tensor], optional): Predictions.
         """
         if not hasattr(self, "criterion"):
             from ultralytics.utils.loss import TVPSegmentLoss
@@ -1503,7 +1503,7 @@ def load_checkpoint(weight, device=None, inplace=True, fuse=False):
     model = (ckpt.get("ema") or ckpt["model"]).float()  # FP32 model
 
     # Model compatibility updates
-    model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
+    model.args = args  # attach args to model
     model.pt_path = weight  # attach *.pt file path to model
     model.task = getattr(model, "task", guess_model_task(model))
     if not hasattr(model, "stride"):
@@ -1542,8 +1542,8 @@ def parse_model(d, ch, verbose=True):
     max_channels = float("inf")
     nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
+    scale = d.get("scale")
     if scales:
-        scale = d.get("scale")
         if not scale:
             scale = tuple(scales.keys())[0]
             LOGGER.warning(f"no model scale passed. Assuming scale='{scale}'.")
@@ -1594,7 +1594,8 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             C2fCIB,
             A2C2f,
-            
+            AMSA,
+            DSFB,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1614,7 +1615,8 @@ def parse_model(d, ch, verbose=True):
             C2fCIB,
             C2PSA,
             A2C2f,
-            DynamicPath, ComplexityPredictor            
+            AMSA,
+            DSFB,
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
@@ -1637,8 +1639,12 @@ def parse_model(d, ch, verbose=True):
             if m is C2fAttn:  # set 1) embed channels and 2) num heads
                 args[1] = make_divisible(min(args[1], max_channels // 2) * width, 8)
                 args[2] = int(max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2])
-
-            args = [c1, c2, *args[1:]]
+            if m is DSFB:
+                args = [c1, c2, n]  # Explicitly pass c1, c2, n for DSFB
+            elif m is AMSA:
+                args = [c2]
+            else:
+                args = [c1, c2, *args[1:]]
             if m in repeat_modules:
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -1652,12 +1658,6 @@ def parse_model(d, ch, verbose=True):
                     args.extend((True, 1.2))
             if m is C2fCIB:
                 legacy = False
-        elif m is ComplexityPredictor:
-            args = [ch[f]]
-        elif m is DynamicPath:
-            c1, c2 = ch[f], args[0]
-            c2 = make_divisible(min(c2, max_channels) * width, 8)
-            args = [c1, c2, *args[1:]]
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in frozenset({HGStem, HGBlock}):
@@ -1672,6 +1672,7 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        
         elif m in frozenset(
             {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
         ):

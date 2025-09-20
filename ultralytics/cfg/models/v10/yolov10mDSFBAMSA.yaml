@@ -1,0 +1,44 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# YOLOv10m with DSFB for COCO subset25 (high novelty for Q1, no MambaNeXt)
+# Model docs: https://docs.ultralytics.com/models/yolov10
+# Task docs: https://docs.ultralytics.com/tasks/detect
+
+# Parameters
+nc: 80 # number of classes
+scales:
+  m: [0.7, 0.75, 640] # Giữ max_channels 640 để tránh overfit
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 5, 2]] # 0-P1/2 # Large kernel cho small objects
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 3, DSFB, [128]] # CHANGED: Thay C2f bằng DSFB cho dynamic multi-scale
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 7, DSFB, [256]] # CHANGED: Repeats 6->7, DSFB cho small objects
+  - [-1, 1, SCDown, [512, 3, 2]] # 5-P4/16
+  - [-1, 5, DSFB, [512]] # CHANGED: Thay C2f, repeats 6->5 để giảm params
+  - [-1, 1, SCDown, [640, 3, 2]] # 7-P5/32
+  - [-1, 3, DSFB, [640]] # CHANGED: Thay C2fCIB bằng DSFB
+  - [-1, 1, SPPF, [640, 5]] # 9
+  - [-1, 1, AMSA, [640]] # Giữ AMSA để bổ trợ attention
+
+# Head
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
+  - [-1, 3, DSFB, [512]] # 13 # CHANGED: Thay C2f
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 4], 1, Concat, [1]] # cat backbone P3
+  - [-1, 4, DSFB, [256]] # 16 (P3/8-small) # Repeats 3->4
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 13], 1, Concat, [1]] # cat head P4
+  - [-1, 3, DSFB, [512]] # 19 (P4/16-medium) # CHANGED: Thay C2fCIB
+
+  - [-1, 1, SCDown, [512, 3, 2]] # Removed sparse=True parameter
+  - [[-1, 10], 1, Concat, [1]] # cat head P5
+  - [-1, 3, DSFB, [640]] # 22 (P5/32-large) # CHANGED: Thay C2fCIB
+
+  - [[16, 19, 22], 1, v10Detect, [nc]] # Detect(P3, P4, P5)

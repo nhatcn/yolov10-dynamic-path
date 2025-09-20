@@ -60,6 +60,7 @@ from .block import (
     SCDown,
     TorchVision,
 )
+from .attention import AMSA, DSFB
 from .dips import DynamicPath, ComplexityPredictor
 from .conv import (
     CBAM,
@@ -181,4 +182,5 @@ __all__ = (
     "Index",
     "A2C2f",
     "DynamicPath", "ComplexityPredictor"
+    "AMSA", "DSFB"
 )
