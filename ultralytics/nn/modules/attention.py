@@ -36,73 +36,55 @@ class AMSA(nn.Module):
         output = fused_features * sa
         return output
 
-# MultiScaleFusion (unchanged)
-class MultiScaleFusion(nn.Module):
-    def __init__(self, c, shortcut=True):
-        super().__init__()
-        self.shortcut = shortcut
-        branch_channels = max(c // 3, 1)
-        self.scales = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(branch_channels, branch_channels, k, 1, k//2, groups=branch_channels),
-                nn.Conv2d(branch_channels, branch_channels, 1)
-            ) for k in [3, 5, 7]
-        ])
-        self.gate = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(c, 3, 1),
-            nn.Softmax(dim=1)
-        )
-
-    def forward(self, y):
-        branch_channels = y.shape[1] // 3
-        y_splits = torch.split(y, branch_channels, dim=1)
-        branches = [scale(split) for scale, split in zip(self.scales, y_splits)]
-        fused = torch.cat(branches, dim=1)
-        weights = self.gate(fused)
-        weighted_branches = [branch * weight for branch, weight in zip(branches, torch.split(weights, 1, dim=1))]
-        final_fused = torch.cat(weighted_branches, dim=1)
-        return final_fused + y if self.shortcut else final_fused
-
-# Fixed DSFB
+# Merged DSFB with inline MultiScaleFusion logic
 class DSFB(nn.Module):
     def __init__(self, c1, c2=None, n=1, shortcut=True, e=0.5):
         super().__init__()
         self.n = n
         self.shortcut = shortcut and c1 == c2  # Only shortcut if dimensions match
         c2 = c2 if c2 is not None else c1  # Default to c1 if c2 not specified
-        c_ = max(int(c2 * e), 8)  # Hidden channels, ensure min 8
-        c_ = make_divisible(c_, 8)  # Ensure divisibility for efficiency
+        self.c_ = make_divisible(max(int(c2 * e), 8), 8)  # Hidden channels
+        self.cv1 = nn.Conv2d(c1, 2 * self.c_, 1, 1)
+        self.cv2 = nn.Conv2d((self.n + 1) * self.c_, c2, 1, 1)
         
-        # Fix: cv1 should split input into two parts for processing
-        self.cv1 = nn.Conv2d(c1, 2 * c_, 1, 1)
-        
-        # Fix: Calculate correct input channels for cv2
-        # We have: c_ (from first split) + n * c_ (from n MultiScaleFusion outputs) + c_ (from second split)
-        total_channels = c_ + n * c_ + c_  # This equals (n + 2) * c_
-        self.cv2 = nn.Conv2d(total_channels, c2, 1, 1)
-        
-        self.m = nn.ModuleList(MultiScaleFusion(c_, shortcut=True) for _ in range(n))
+        # Inline MultiScaleFusion init: Create scales and gate for each repeat
+        self.scales_list = nn.ModuleList()
+        self.gate_list = nn.ModuleList()
+        for _ in range(n):
+            branch_channels = max(self.c_ // 3, 1)
+            scales = nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv2d(branch_channels, branch_channels, k, 1, k//2, groups=branch_channels),
+                    nn.Conv2d(branch_channels, branch_channels, 1)
+                ) for k in [3, 5, 7]
+            ])
+            gate = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Conv2d(self.c_, 3, 1),
+                nn.Softmax(dim=1)
+            )
+            self.scales_list.append(scales)
+            self.gate_list.append(gate)
 
     def forward(self, x):
-        # Split cv1 output into two parts
         y = self.cv1(x)
-        y1, y2 = y.chunk(2, dim=1)  # Split into two equal parts
+        y1, y2 = y.chunk(2, dim=1)  # Split into two parts
+        ys = [y1]  # Start with first part
         
-        # Start with the first part
-        ys = [y1]
+        last_output = y1  # Initialize with first part for sequential processing
+        for i in range(self.n):
+            # Inline MultiScaleFusion forward
+            branch_channels = last_output.shape[1] // 3
+            y_splits = torch.split(last_output, branch_channels, dim=1)
+            branches = [scale(split) for scale, split in zip(self.scales_list[i], y_splits)]
+            fused = torch.cat(branches, dim=1)
+            weights = self.gate_list[i](fused)
+            weighted_branches = [branch * weight for branch, weight in zip(branches, torch.split(weights, 1, dim=1))]
+            final_fused = torch.cat(weighted_branches, dim=1)
+            if self.shortcut:
+                final_fused = final_fused + last_output
+            ys.append(final_fused)
+            last_output = final_fused  # Update for next iteration
         
-        # Apply MultiScaleFusion modules sequentially
-        last_output = y2  # Start with second part
-        for m in self.m:
-            last_output = m(last_output)
-            ys.append(last_output)
-        
-        # Add the second part at the end
-        ys.append(y2)
-        
-        # Concatenate all outputs
         y = self.cv2(torch.cat(ys, dim=1))
-        
-        # Apply shortcut connection if dimensions match
         return x + y if self.shortcut else y
