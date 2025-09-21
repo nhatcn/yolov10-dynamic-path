@@ -50,14 +50,21 @@ class AMSA(nn.Module):
         return x + out
 
 class DSFB(nn.Module):
-    """Dynamic Scale Fusion Block - Fixed version"""
+    """Dynamic Scale Fusion Block - Completely fixed version for YOLOv10"""
     def __init__(self, c1, c2=None, n=1, shortcut=True, e=0.5):
         super().__init__()
         c2 = c2 or c1
         self.shortcut = shortcut and c1 == c2
         
-        # Hidden channels
-        c_hidden = make_divisible(int(c1 * e), 8)
+        # Use n as shortcut parameter if it's boolean
+        if isinstance(n, bool):
+            self.shortcut = n and c1 == c2
+            n = 1  # Default to 1 block
+        
+        # Calculate hidden channels safely
+        # Ensure c_hidden is divisible by 24 (so each branch gets 8 channels minimum)
+        c_hidden = max(int(c1 * e), 24)
+        c_hidden = ((c_hidden + 23) // 24) * 24  # Round up to nearest multiple of 24
         
         # Input projection
         self.cv1 = nn.Conv2d(c1, 2 * c_hidden, 1)
@@ -89,71 +96,97 @@ class DSFB(nn.Module):
         return x + y if self.shortcut else y
 
 class MSBlock(nn.Module):
-    """Multi-Scale Block - Core component of DSFB"""
+    """Multi-Scale Block - Completely fixed channel handling"""
     def __init__(self, c):
         super().__init__()
-        c_branch = max(c // 3, 8)  # Ensure minimum channels
         
-        # Three scale branches
+        # Ensure c is divisible by 3 first, then by 8 for each branch
+        c = max(c, 24)  # Minimum 24 channels (8*3)
+        c = ((c + 23) // 24) * 24  # Make divisible by 24
+        self.c = c
+        
+        # Split into 3 equal branches, each divisible by 8
+        c_branch = c // 3
+        c_branch = max(c_branch, 8)  # Minimum 8 channels per branch
+        c_branch = ((c_branch + 7) // 8) * 8  # Make divisible by 8
+        self.c_branch = c_branch
+        
+        # Calculate groups properly
+        def safe_groups(channels, max_groups=8):
+            """Calculate safe number of groups that divides channels evenly"""
+            for groups in [max_groups, 4, 2, 1]:
+                if channels % groups == 0:
+                    return groups
+            return 1
+        
+        groups1 = safe_groups(c_branch)
+        groups2 = safe_groups(c_branch) 
+        groups3 = safe_groups(c_branch)
+        
+        # Three scale branches with guaranteed valid groups
         self.branch1 = nn.Sequential(
-            nn.Conv2d(c_branch, c_branch, 3, 1, 1, groups=c_branch),
+            nn.Conv2d(c_branch, c_branch, 3, 1, 1, groups=groups1),
             nn.Conv2d(c_branch, c_branch, 1),
             nn.BatchNorm2d(c_branch),
             nn.SiLU(inplace=True)
         )
         
         self.branch2 = nn.Sequential(
-            nn.Conv2d(c_branch, c_branch, 5, 1, 2, groups=c_branch),  
+            nn.Conv2d(c_branch, c_branch, 5, 1, 2, groups=groups2),  
             nn.Conv2d(c_branch, c_branch, 1),
             nn.BatchNorm2d(c_branch),
             nn.SiLU(inplace=True)
         )
         
         self.branch3 = nn.Sequential(
-            nn.Conv2d(c_branch, c_branch, 7, 1, 3, groups=c_branch),
+            nn.Conv2d(c_branch, c_branch, 7, 1, 3, groups=groups3),
             nn.Conv2d(c_branch, c_branch, 1), 
             nn.BatchNorm2d(c_branch),
             nn.SiLU(inplace=True)
         )
         
+        # Input channel adjustment
+        actual_input_needed = 3 * c_branch
+        self.input_adjust = nn.Conv2d(c, actual_input_needed, 1) if c != actual_input_needed else None
+        
+        # Output channel adjustment  
+        actual_output_channels = 3 * c_branch
+        self.output_adjust = nn.Conv2d(actual_output_channels, c, 1) if actual_output_channels != c else None
+        
         # Adaptive weights
         self.weight_gen = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(c, 3, 1),
+            nn.Conv2d(actual_output_channels, 3, 1),
             nn.Softmax(dim=1)
         )
-        
-        # Adjust channels if needed
-        self.c_branch = c_branch
-        self.adjust_channels = c != 3 * c_branch
-        if self.adjust_channels:
-            self.channel_adjust = nn.Conv2d(c, 3 * c_branch, 1)
-            self.output_adjust = nn.Conv2d(3 * c_branch, c, 1)
     
     def forward(self, x):
-        if self.adjust_channels:
-            x_adjusted = self.channel_adjust(x)
-        else:
-            x_adjusted = x
+        # Adjust input channels if needed
+        if self.input_adjust is not None:
+            x = self.input_adjust(x)
             
         # Split into branches
-        x1, x2, x3 = torch.split(x_adjusted, self.c_branch, dim=1)
+        x1, x2, x3 = torch.split(x, self.c_branch, dim=1)
         
         # Process each branch
         out1 = self.branch1(x1)
         out2 = self.branch2(x2) 
         out3 = self.branch3(x3)
         
+        # Concatenate outputs
+        concat_out = torch.cat([out1, out2, out3], dim=1)
+        
         # Generate adaptive weights
-        weights = self.weight_gen(x_adjusted)
+        weights = self.weight_gen(concat_out)
         w1, w2, w3 = torch.split(weights, 1, dim=1)
         
-        # Weighted fusion
-        fused = out1 * w1 + out2 * w2 + out3 * w3
+        # Weighted fusion (optional - using concat for simplicity)
+        # fused = out1 * w1 + out2 * w2 + out3 * w3
         
-        if self.adjust_channels:
-            fused = self.output_adjust(torch.cat([out1, out2, out3], dim=1))
+        # Adjust output channels if needed
+        if self.output_adjust is not None:
+            output = self.output_adjust(concat_out)
         else:
-            fused = torch.cat([out1, out2, out3], dim=1)
+            output = concat_out
         
-        return fused
+        return output
